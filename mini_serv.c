@@ -1,255 +1,351 @@
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+#include <netdb.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <netinet/in.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/select.h>
-#include <string.h>
 #include <stdio.h>
 
-#define MAX_BUFFER_SIZE 4096
+#define	BUFFER_MAX_SIZE 4096
 
 typedef struct	s_client
 {
-	int				fd;
-	int				id;
-	struct s_client*	next;
+	int		fd;
+	int		id;
 	struct s_client*	prev;
+	struct s_client*	next;
 }								t_client;
 
-int				max_fd = 0;
+int				nfds;
 t_client*	client = NULL;
 
-
-void	removeClient(int _fd)
+int extract_message(char **buf, char **msg)
 {
-	t_client*	next = client;
+	char	*newbuf;
+	int	i;
 
-	while (!next && next->fd != _fd)
-		next = next->next;
-	if (next)
+	*msg = 0;
+	if (*buf == 0)
+		return (0);
+	i = 0;
+	while ((*buf)[i])
 	{
-		close(_fd);
-		next->prev->next = next->next;
-		next->prev = NULL;
-		next->next = NULL;
-		free(next);
+		if ((*buf)[i] == '\n')
+		{
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			if (newbuf == 0)
+				return (-1);
+			strcpy(newbuf, *buf + i + 1);
+			*msg = *buf;
+			(*msg)[i + 1] = 0;
+			*buf = newbuf;
+			return (1);
+		}
+		i++;
 	}
-	else
-		printf("Can't find %d", _fd);
+	return (0);
 }
 
-t_client*	get_last_client(void)
+char *str_join(char *buf, char *add)
+{
+	char	*newbuf;
+	int		len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 2));
+	if (newbuf == 0)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	newbuf[len + strlen(add) + 1] = '\n';
+	newbuf[len + strlen(add) + 2] = 0;
+	return (newbuf);
+}
+
+void	ft_write_stdin(char*	str)
+{
+	write(1, str, strlen(str));
+	write(1, "\n", 1);
+}
+
+void	ft_write_stderr(char*	str)
+{
+	write(2, str, strlen(str));
+	write(2, "\n", 1);
+}
+
+void	ft_exit(char *str, int status)
+{
+	ft_write_stderr(str);
+	exit(status);
+}
+
+void	init_fdset(int sockfd, fd_set* readfds)
+{
+	t_client*	clt = client;
+
+	FD_ZERO(readfds);
+	FD_SET(sockfd, readfds);
+	while (clt)
+	{
+		if (clt->fd > nfds)
+			nfds = clt->fd;
+		FD_SET(clt->fd, readfds);
+		clt = clt->next;
+	}
+	write(1, "\n", 1);
+}
+
+size_t	client_size()
+{
+	size_t	size = 0;
+	t_client*	clt = client;
+
+	while (clt)
+	{
+		clt = clt->next;
+		++size;
+	}
+	return (size);
+}
+
+t_client*	client_last()
 {
 	t_client*	last = client;
 
-	if (!last)
-		return (NULL);
-	while (last->next)
+	while (last && last->next)
 		last = last->next;
 	return (last);
 }
 
-void	addClient(int _fd)
+int		client_id_by_fd(int _fd)
 {
-	t_client*	new_client = malloc(sizeof(t_client*));
-	t_client*	last_client = get_last_client();
+	t_client*	clt = client;
 
-	new_client->fd = _fd;
-	new_client->next = NULL;
-	if (last_client)
+	while (clt && clt->fd != _fd)
+		clt = clt->next;
+	if (!clt)
+		ft_exit("client_id_by_fd failed...", 2);
+	return (clt->id);
+}
+
+void	ft_select(fd_set* readfds)
+{
+	if (select(nfds + 1, readfds, NULL, NULL, NULL) < 0)
+		ft_exit("Fatal error", 1);
+}
+
+int		add_client(int _fd)
+{
+	t_client*	last = client_last();
+	t_client*	new = malloc(sizeof(t_client));
+
+	if (!new)
+		ft_exit("Fatal error", 1);
+	new->fd = _fd;
+	new->next = NULL;
+	if (!last)
 	{
-		new_client->id = last_client->id + 1;
-		last_client->next = new_client;
-		new_client->prev = last_client;
+		client = new;
+		client->prev = NULL;
+		client->id = 0;
 	}
 	else
 	{
-		new_client->id = 0;
-		new_client->prev = NULL;
-		new_client->next = NULL;
-		client = new_client;
+		new->prev = last;
+		last->next = new;
+		new->id = last->id + 1;
 	}
-	write(0, "new client\n", 12);
+	return (new->id);
 }
 
-int		get_id_by_fd(int _fd)
+void	ft_send(char *msg, int sender_fd)
 {
-	t_client*	next = client;
+	t_client*	clt = client;
 
-	if (!next)
-		return (0);
-	while (next && next->fd != _fd)
-		next = next->next;
-	if (!next)
-		printf("client %d not found", _fd);
-	return (next->id);
-}
-
-void	send_to_clients(int sender_fd, char* msg, int config)
-{
-	t_client*	next = client;
-	char			from_who[100];
-	size_t		msg_len = strlen(msg);
-	size_t		from_who_len;
-	int				sender_id = get_id_by_fd(sender_fd);
-
-	sprintf(from_who, "client %d: ", sender_id);
-	from_who_len = strlen(from_who);
-	while (next)
+	char c = sender_fd + 48;
+	write(1, &c, 1);
+	write(1, " | ", 3);
+	while (clt)
 	{
-		if (next->fd != sender_fd)
+		
+		if (clt->fd != sender_fd)
 		{
-			if (config)
-				send(next->fd, from_who, from_who_len, MSG_DONTWAIT);
-			send(next->fd, msg, msg_len, MSG_DONTWAIT);
+			if (send(clt->fd, msg, strlen(msg), MSG_DONTWAIT) < 0)
+				ft_exit("Fatal error", 1);
 		}
-		next = next->next;
-	}
-}
-
-void	acceptClient(int sockfd, struct sockaddr_in servaddr, int len)
-{
-	char		buffer[100];
-
-	int fd = accept(sockfd, (struct sockaddr *)&servaddr, (socklen_t*)&len);
-	if (fd < 0)
-	{
-		sprintf(buffer, "fd %d failed\n", fd);
-		write(1, buffer, strlen(buffer));
-		exit(0);
-	}
-	write(fd, "hello\n", 6);
-	sprintf(buffer, "server: client %d just arrived\n", fd);
-	send_to_clients(fd, buffer, 0);
-	addClient(fd);
-	max_fd = fd;
-}
-
-void	build_fdsets(int sockfd, fd_set* readfds)
-{
-	t_client*	next = client;
-
-	FD_ZERO(readfds);
-	FD_SET(sockfd, readfds);
-	while (next)
-	{
-		FD_SET(next->fd, readfds);
-		next = next->next;
-	}
-}
-
-void	recv_from_server(int fd, char* recv_msg)
-{
-	int		read_bytes;
-	int		id = get_id_by_fd(fd);
-
-	read_bytes = recv(fd, recv_msg, MAX_BUFFER_SIZE - 1, 0);
-	if (read_bytes > 0)
-		send_to_clients(fd, recv_msg, 1);
-	else if (read_bytes == 0)
-	{
-		printf("client %d disconnect", fd);
-		removeClient(fd);
-	}
-}
-
-void	ft_select(int max_fd, int fd, fd_set* readfds)
-{
-	if (select(max_fd + 1, readfds, NULL, NULL, NULL) < 0)
-	{
-		printf("select fct failed");
-		exit(0);
-	}
-}
-
-void	receiveMsg(fd_set* readfds)
-{
-	t_client*	next = client;
-	char	recv_msg[MAX_BUFFER_SIZE];
-
-	while (next)
-	{
-		if (FD_ISSET(next->fd, readfds))
+		else
 		{
-			memset(recv_msg, 0, sizeof(recv_msg));
-			recv_from_server(next->fd, recv_msg);
+			c = clt->fd + 48;
+			write(1, &c, 1);
 		}
-		next = next->next;
+		clt = clt->next;
 	}
+	write(1, "\n", 1);
 }
 
-void	serverLoop(int sockfd, struct sockaddr_in servaddr)
+void	ft_send_by_client(char* msg, int sender_fd)
 {
-	int	len = sizeof(struct sockaddr_in);
+	int				sender_id = client_id_by_fd(sender_fd);
+	char*			final_msg = malloc(50);
+
+	if (!final_msg)
+		ft_exit("Fatal error", 1);
+	sprintf(final_msg, "client %d: ", sender_id);
+	final_msg = str_join(final_msg, msg);
+	if (!final_msg)
+		ft_exit("Fatal error", 1);
+	ft_send(final_msg, sender_fd);
+	free(final_msg);
+}
+
+void	ft_send_by_server(int config, int id)
+{
+	char	msg[100];
+
+	if (config == 1)
+		sprintf(msg, "server: client %d just arrived\n", id);
+	else
+		sprintf(msg, "server: client %d just left\n", id);
+	ft_send(msg, 0);
+}
+
+void	ft_accept(int sockfd)
+{
+	struct sockaddr_in	cli;
+	int									len = sizeof(cli);
+	int									connfd;
+	int									id;
+
+	connfd = accept(sockfd, (struct sockaddr *)&cli, (socklen_t*)&len);
+	if (connfd < 0)
+		ft_exit("server accept failed...", 1);
+	id = add_client(connfd);
+	ft_send_by_server(1, id);
+}
+
+void	client_remove(int _fd)
+{
+	t_client*	clt = client;
+
+	while (clt && clt->fd != _fd)
+		clt = clt->next;
+	if (!clt)
+		ft_exit("Removint client failed...", 2);
+	if (client_size() != 1)
+	{
+		if (clt->prev)
+		{
+			clt->prev->next = clt->next;
+			if (clt->next)
+				clt->next->prev = clt->prev->next;
+		}
+		else
+		{
+			client = clt->next;
+			client->prev = NULL;
+		}
+		clt->prev = NULL;
+		clt->next = NULL;
+	}
+	else
+	{
+		client = NULL;
+	}
+	free(clt);
+	close(_fd);
+}
+
+void	ft_recv(fd_set* readfds)
+{
+	t_client*	clt = client;
+	int				bytes;
+	char			buffer[BUFFER_MAX_SIZE];
+
+	char c;
+	memset(buffer, 0, BUFFER_MAX_SIZE);
+	while (clt)
+	{
+		write(1, "FD_ISSET: ", 10);
+		c = clt->fd + 48;
+		write(1, &c, 1);
+		write(1, " ; ", 3);
+		if (FD_ISSET(clt->fd, readfds))
+		{
+			bytes = recv(clt->fd, buffer, BUFFER_MAX_SIZE - 1, MSG_DONTWAIT);
+			if (!bytes)
+			{
+				ft_send_by_server(2, clt->id);
+				client_remove(clt->fd);
+			}
+			else
+			{
+				ft_send_by_client(buffer, clt->fd);
+			}
+			memset(buffer, 0, BUFFER_MAX_SIZE);
+		}
+		clt = clt->next;
+	}
+	write(1, "\n", 1);
+}
+
+void	server_loop(int sockfd)
+{
 	fd_set	readfds;
-	fd_set	writefds;
 
-	max_fd = sockfd;
+	nfds = sockfd;
 	while (1)
 	{
-		build_fdsets(sockfd, &readfds);
-		ft_select(max_fd, sockfd, &readfds);
+		init_fdset(sockfd, &readfds);
+		ft_select(&readfds);
 		if (FD_ISSET(sockfd, &readfds))
-			acceptClient(sockfd, servaddr, len);
-		if (client)
-			printf("client connected");
-		receiveMsg(&readfds);
+			ft_accept(sockfd);
+		ft_recv(&readfds);
 	}
 }
 
-void	createSocket(int* sockfd)
+int main(int ac, char **av)
 {
-	*sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (*sockfd == -1)
-	{
-		printf("Failed to create socket");
-		exit (0);
-	}
-}
-
-void	initSockaddr(struct sockaddr_in* servaddr, char* port)
-{
-	servaddr->sin_family = AF_INET;
-	servaddr->sin_addr.s_addr = htonl(2130706433);
-	servaddr->sin_port = htons(atoi(port));
-}
-
-void	bindSocket(int* sockfd, struct sockaddr_in* servaddr)
-{
-	if ((bind(*sockfd, (const struct sockaddr *)servaddr, sizeof(*servaddr))) != 0)
-	{
-		printf("socket bind failed");
-		exit(0);
-	}
-}
-
-void	listenSocket(int* sockfd)
-{
-	if (listen(*sockfd, 10) < 0)
-	{
-		printf("cannot listen");
-		exit (0);
-	}
-}
-
-int		main(int ac, char **av)
-{
-	if (ac != 2)
-	{
-		printf("Wrong number of arguments");
-		exit (0);
-	}
-
 	int									sockfd;
-	struct sockaddr_in	servaddr;
+	struct sockaddr_in	servaddr; 
 
-	createSocket(&sockfd);
-	initSockaddr(&servaddr, av[1]);
-	bindSocket(&sockfd, &servaddr);
-	listenSocket(&sockfd);
+	if (ac != 2)
+		return (1);
 
-	serverLoop(sockfd, servaddr);
+	// socket create and verification 
+	sockfd = socket(AF_INET, SOCK_STREAM, 0); 
+	if (sockfd == -1) { 
+		ft_write_stdin("socket creation failed...\n"); 
+		exit(0); 
+	} 
+	else
+		ft_write_stdin("Socket successfully created..\n"); 
+	bzero(&servaddr, sizeof(servaddr)); 
+
+	// assign IP, PORT 
+	servaddr.sin_family = AF_INET; 
+	servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
+	servaddr.sin_port = htons(atoi(av[1])); 
+  
+	// Binding newly created socket to given IP and verification 
+	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) { 
+		ft_write_stdin("socket bind failed...\n"); 
+		exit(0); 
+	} 
+	else
+		ft_write_stdin("Socket successfully binded..\n");
+	if (listen(sockfd, 10) != 0) {
+		ft_write_stdin("cannot listen\n"); 
+		exit(0); 
+	}
+	server_loop(sockfd);
 	close(sockfd);
 	return (0);
 }
