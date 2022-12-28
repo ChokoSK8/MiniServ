@@ -24,6 +24,7 @@ int extract_message(char **buf, char **msg)
 			strcpy(newbuf, *buf + i + 1);
 			*msg = *buf;
 			(*msg)[i + 1] = 0;
+			free(*buf);
 			*buf = newbuf;
 			return (1);
 		}

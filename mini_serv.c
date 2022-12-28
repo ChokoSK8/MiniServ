@@ -87,7 +87,7 @@ void	ft_exit(char *str, int status)
 	exit(status);
 }
 
-void	init_fdset(int sockfd, fd_set* readfds)
+void	init_fdset(int sockfd, fd_set* readfds, fd_set* writefds)
 {
 	t_client*	clt = client;
 
@@ -98,9 +98,9 @@ void	init_fdset(int sockfd, fd_set* readfds)
 		if (clt->fd > nfds)
 			nfds = clt->fd;
 		FD_SET(clt->fd, readfds);
+		FD_SET(clt->fd, writefds);
 		clt = clt->next;
 	}
-	write(1, "\n", 1);
 }
 
 size_t	client_size()
@@ -166,32 +166,22 @@ int		add_client(int _fd)
 	return (new->id);
 }
 
-void	ft_send(char *msg, int sender_fd)
+void	ft_send(char *msg, int sender_fd, fd_set* writefds)
 {
 	t_client*	clt = client;
 
-	char c = sender_fd + 48;
-	write(1, &c, 1);
-	write(1, " | ", 3);
 	while (clt)
 	{
-		
-		if (clt->fd != sender_fd)
+		if (clt->fd != sender_fd && FD_ISSET(clt->fd, writefds))
 		{
 			if (send(clt->fd, msg, strlen(msg), MSG_DONTWAIT) < 0)
 				ft_exit("Fatal error", 1);
 		}
-		else
-		{
-			c = clt->fd + 48;
-			write(1, &c, 1);
-		}
 		clt = clt->next;
 	}
-	write(1, "\n", 1);
 }
 
-void	ft_send_by_client(char* msg, int sender_fd)
+void	ft_send_by_client(char* msg, int sender_fd, fd_set* writefds)
 {
 	int				sender_id = client_id_by_fd(sender_fd);
 	char*			final_msg = malloc(50);
@@ -202,11 +192,11 @@ void	ft_send_by_client(char* msg, int sender_fd)
 	final_msg = str_join(final_msg, msg);
 	if (!final_msg)
 		ft_exit("Fatal error", 1);
-	ft_send(final_msg, sender_fd);
+	ft_send(final_msg, sender_fd, writefds);
 	free(final_msg);
 }
 
-void	ft_send_by_server(int config, int id)
+void	ft_send_by_server(int config, int id, fd_set* writefds)
 {
 	char	msg[100];
 
@@ -214,10 +204,10 @@ void	ft_send_by_server(int config, int id)
 		sprintf(msg, "server: client %d just arrived\n", id);
 	else
 		sprintf(msg, "server: client %d just left\n", id);
-	ft_send(msg, 0);
+	ft_send(msg, 0, writefds);
 }
 
-void	ft_accept(int sockfd)
+void	ft_accept(int sockfd, fd_set* writefds)
 {
 	struct sockaddr_in	cli;
 	int									len = sizeof(cli);
@@ -228,7 +218,7 @@ void	ft_accept(int sockfd)
 	if (connfd < 0)
 		ft_exit("server accept failed...", 1);
 	id = add_client(connfd);
-	ft_send_by_server(1, id);
+	ft_send_by_server(1, id, writefds);
 }
 
 void	client_remove(int _fd)
@@ -263,7 +253,7 @@ void	client_remove(int _fd)
 	close(_fd);
 }
 
-void	ft_recv(fd_set* readfds)
+void	ft_recv(fd_set* readfds, fd_set* writefds)
 {
 	t_client*	clt = client;
 	int				bytes;
@@ -273,41 +263,37 @@ void	ft_recv(fd_set* readfds)
 	memset(buffer, 0, BUFFER_MAX_SIZE);
 	while (clt)
 	{
-		write(1, "FD_ISSET: ", 10);
 		c = clt->fd + 48;
-		write(1, &c, 1);
-		write(1, " ; ", 3);
 		if (FD_ISSET(clt->fd, readfds))
 		{
 			bytes = recv(clt->fd, buffer, BUFFER_MAX_SIZE - 1, MSG_DONTWAIT);
 			if (!bytes)
 			{
-				ft_send_by_server(2, clt->id);
+				ft_send_by_server(2, clt->id, writefds);
 				client_remove(clt->fd);
 			}
 			else
 			{
-				ft_send_by_client(buffer, clt->fd);
+				ft_send_by_client(buffer, clt->fd, writefds);
 			}
 			memset(buffer, 0, BUFFER_MAX_SIZE);
 		}
 		clt = clt->next;
 	}
-	write(1, "\n", 1);
 }
 
 void	server_loop(int sockfd)
 {
-	fd_set	readfds;
+	fd_set	readfds, writefds;
 
 	nfds = sockfd;
 	while (1)
 	{
-		init_fdset(sockfd, &readfds);
+		init_fdset(sockfd, &readfds, &writefds);
 		ft_select(&readfds);
 		if (FD_ISSET(sockfd, &readfds))
-			ft_accept(sockfd);
-		ft_recv(&readfds);
+			ft_accept(sockfd, &writefds);
+		ft_recv(&readfds, &writefds);
 	}
 }
 
